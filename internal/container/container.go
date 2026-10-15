@@ -4,7 +4,8 @@
 // "init" subcommand inside fresh UTS, PID, mount and network namespaces. The
 // parent connects the child's network namespace to the host bridge and sends
 // the child its address over a pipe (fd 3). The child configures its network,
-// sets the hostname, pivots into the rootfs, mounts /proc and /dev, joins the
+// sets the hostname, mounts an overlay of a fresh writable layer over the
+// read-only base rootfs, pivots into it, mounts /proc and /dev, joins the
 // cgroup and execs the command.
 package container
 
@@ -12,11 +13,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"syscall"
 
 	"github.com/markthornson/kiln/internal/cgroups"
 	"github.com/markthornson/kiln/internal/network"
+	"github.com/markthornson/kiln/internal/overlay"
 )
 
 // Network modes.
@@ -28,7 +31,7 @@ const (
 // Config describes one container run.
 type Config struct {
 	ID       string
-	Rootfs   string
+	Rootfs   string // read-only base image; the container writes to its own layer
 	Hostname string
 	Args     []string
 	Limits   cgroups.Limits
@@ -37,7 +40,25 @@ type Config struct {
 
 // Run starts the container, waits for it and returns its exit code.
 func Run(c Config) (int, error) {
-	cmd := exec.Command("/proc/self/exe", append([]string{"init", c.ID, c.Rootfs, c.Hostname}, c.Args...)...)
+	switch c.Network {
+	case "", NetworkNone, NetworkBridge:
+	default:
+		return -1, fmt.Errorf("unknown network mode %q", c.Network)
+	}
+	base, err := filepath.Abs(c.Rootfs)
+	if err != nil {
+		return -1, err
+	}
+	if fi, err := os.Stat(base); err != nil || !fi.IsDir() {
+		return -1, fmt.Errorf("rootfs %s is not a directory", c.Rootfs)
+	}
+	state, err := newState(c.ID)
+	if err != nil {
+		return -1, err
+	}
+	defer os.RemoveAll(state)
+
+	cmd := exec.Command("/proc/self/exe", append([]string{"init", c.ID, base, state, c.Hostname}, c.Args...)...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET,
@@ -46,14 +67,10 @@ func Run(c Config) (int, error) {
 		// looks stale and gets handed to the next container.
 		Pdeathsig: syscall.SIGKILL,
 	}
-	switch c.Network {
-	case "", NetworkNone:
-	case NetworkBridge:
+	if c.Network == NetworkBridge {
 		if err := network.EnsureBridge(); err != nil {
 			return -1, err
 		}
-	default:
-		return -1, fmt.Errorf("unknown network mode %q", c.Network)
 	}
 
 	group, err := cgroups.New(c.ID, c.Limits)
@@ -109,7 +126,8 @@ func Run(c Config) (int, error) {
 }
 
 // Init runs inside the new namespaces as PID 1. It never returns on success.
-func Init(id, rootfs, hostname string, args []string) error {
+// base is the read-only image and state the directory made by newState.
+func Init(id, base, state, hostname string, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("no command given")
 	}
@@ -137,7 +155,14 @@ func Init(id, rootfs, hostname string, args []string) error {
 	if err := syscall.Mount("", "/", "", syscall.MS_PRIVATE|syscall.MS_REC, ""); err != nil {
 		return fmt.Errorf("make / private: %w", err)
 	}
-	if err := enterRootfs(rootfs); err != nil {
+	// Mounted in our own namespace only: the host never sees it, and it goes
+	// away with the container.
+	merged := filepath.Join(state, "merged")
+	opts := overlay.Options(base, filepath.Join(state, "upper"), filepath.Join(state, "work"))
+	if err := syscall.Mount("overlay", merged, "overlay", 0, opts); err != nil {
+		return fmt.Errorf("mount overlay: %w", err)
+	}
+	if err := enterRootfs(merged); err != nil {
 		return err
 	}
 	if err := syscall.Mount("proc", "/proc", "proc", 0, ""); err != nil {
@@ -163,14 +188,11 @@ func Init(id, rootfs, hostname string, args []string) error {
 	return syscall.Exec(path, args, env)
 }
 
-// enterRootfs makes rootfs the root mount of this mount namespace and detaches
-// the old root. Unlike chroot, which only changes the path lookup start, this
-// leaves no mount of the host filesystem for the process to climb back to.
+// enterRootfs makes rootfs, which must be a mount point, the root mount of
+// this mount namespace and detaches the old root. Unlike chroot, which only
+// changes the path lookup start, this leaves no mount of the host filesystem
+// for the process to climb back to.
 func enterRootfs(rootfs string) error {
-	// pivot_root requires the new root to be a mount point.
-	if err := syscall.Mount(rootfs, rootfs, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
-		return fmt.Errorf("bind mount rootfs: %w", err)
-	}
 	if err := os.Chdir(rootfs); err != nil {
 		return err
 	}

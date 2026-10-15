@@ -10,7 +10,7 @@ property test, and the README updated (including the "Bugs found" table).
 - [x] M1.3 `kiln rootfs`: build rootfs from host binaries via ldd (fuzzed)
 - [x] M1.4 `pivot_root` instead of chroot (chroot is escapable)
 - [x] M1.5 Network namespace + veth pair + bridge, so containers get an IP
-- [ ] M1.6 Overlay filesystem: read-only base image + per-container writable layer
+- [x] M1.6 Overlay filesystem: read-only base image + per-container writable layer
 - [ ] M1.7 Integration test suite (`go test -tags integration`, needs root): isolation, limits, cleanup
 - [ ] M1.8 cgroup v2 support, detected at runtime
 - [ ] M1.9 Drop capabilities + seccomp filter; test that escape attempts fail
@@ -44,4 +44,6 @@ property test, and the README updated (including the "Bugs found" table).
   chroot breakout, but a root process could still e.g. `mknod` the host disk and mount it.
 - Networking is IPv4-only on one fixed subnet (10.88.0.0/24), with no NAT/masquerade to
   the outside, no port publishing and no DNS. Containers reach the host and each other only.
+- Images are a single directory (one lower layer). There is no layered image format, and a
+  container's writable layer is discarded on exit (no `commit` or `diff`).
 - Only cgroup v1 is supported so far (the dev sandbox uses v1).

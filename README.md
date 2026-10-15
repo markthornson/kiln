@@ -3,7 +3,7 @@
 A homelab platform built from scratch, to learn how Docker, Kubernetes and
 CI systems actually work. It is built in layers:
 
-1. **Container runtime**: namespaces, cgroups, pivot_root, bridged networking (← we are here)
+1. **Container runtime**: namespaces, cgroups, pivot_root, bridged networking, overlay filesystems (← we are here)
 2. **Job scheduler**: queue jobs and run them in containers with limits
 3. **Mini CI**: watch a repo, run its tests in containers, keep history
 4. **Testing lab**: the platform's real workload is fuzzing, property-testing
@@ -23,7 +23,25 @@ sudo ./kiln run -pids 5 /tmp/rfs sh -c 'for i in $(seq 8); do sleep 1 & done'   
 sudo ./kiln run -memory 20000000 /tmp/rfs sh -c 'x=a; while :; do x=$x$x; done' # OOM-killed
 sudo ./kiln run /tmp/rfs sh -c 'echo $KILN_IP; cat /proc/net/route'   # eth0 on the kiln0 bridge
 sudo ./kiln run -net none /tmp/rfs cat /proc/net/dev                    # loopback only
+sudo ./kiln run /tmp/rfs sh -c 'rm /bin/ls; echo hi > /etc/hostname'    # ...then /tmp/rfs is untouched
 ```
+
+### Filesystem
+
+`ROOTFS` is a read-only base image. Each container gets an overlay of a fresh
+writable layer on top of it, so containers can change, create and delete
+anything without affecting the base or each other:
+
+```
+/var/lib/kiln/containers/<id>/upper    the container's writes (and deletion "whiteouts")
+/var/lib/kiln/containers/<id>/work     overlayfs scratch space
+/var/lib/kiln/containers/<id>/merged   overlay mount point, mounted only in the container's namespace
+```
+
+The layer is deleted when the container exits; layers left by a killed kiln
+process are pruned on the next run. Paths are escaped for the overlay options
+string (`,` `:` `\`), so a base path like `/images/a,b` works and `/a:/b` can't
+be misread as two layers.
 
 ### Networking
 
@@ -51,11 +69,12 @@ go test ./internal/mountinfo -run='^$' -fuzz=FuzzParseLine -fuzztime=30s
 go test ./cmd/kiln -run='^$' -fuzz=FuzzParseRun -fuzztime=30s
 go test ./internal/netlink -run='^$' -fuzz=FuzzAttrsRoundTrip -fuzztime=30s
 go test ./internal/network -run='^$' -fuzz=FuzzLeases -fuzztime=30s
+go test ./internal/overlay -run='^$' -fuzz=FuzzOptionsRoundTrip -fuzztime=30s
 ```
 
 Fuzz targets: `FuzzParseLdd`, `FuzzParseLine`, `FuzzEscapeRoundTrip`,
 `FuzzParseRun`, `FuzzAttrsRoundTrip`, `FuzzMessagesRoundTrip`, `FuzzPick`,
-`FuzzLeases`, `FuzzParseSpec`.
+`FuzzLeases`, `FuzzParseSpec`, `FuzzOptionsRoundTrip`.
 
 ## Bugs found so far
 

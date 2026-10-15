@@ -70,11 +70,11 @@ func dispatch(args []string, stderr io.Writer) int {
 		}
 		return code
 	case "init":
-		if len(args) < 4 {
+		if len(args) < 5 {
 			fmt.Fprintln(stderr, "kiln: init is internal; use kiln run")
 			return 2
 		}
-		err := container.Init(args[1], args[2], args[3], args[4:])
+		err := container.Init(args[1], args[2], args[3], args[4], args[5:])
 		// Init only returns on failure.
 		fmt.Fprintf(stderr, "kiln: init: %v\n", err)
 		return 1

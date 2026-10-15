@@ -18,6 +18,7 @@ Long-term learning project: a homelab platform (container runtime → scheduler
     go test ./internal/rootfs -run='^$' -fuzz=FuzzParseLdd -fuzztime=30s
     go test ./internal/mountinfo -run='^$' -fuzz=FuzzParseLine -fuzztime=30s
     go test ./internal/network -run='^$' -fuzz=FuzzLeases -fuzztime=30s
+    go test ./internal/overlay -run='^$' -fuzz=FuzzOptionsRoundTrip -fuzztime=30s
     go build -o kiln ./cmd/kiln && ./kiln rootfs /tmp/rfs && ./kiln run /tmp/rfs sh
 
 ## Environment notes (cloud sandbox)
@@ -33,5 +34,8 @@ Long-term learning project: a homelab platform (container runtime → scheduler
 - iproute2 (`ip`) is not installed; use internal/netlink, or read /sys/class/net
   and /proc/net/*. Network tests create the host's kiln0 bridge and use leases
   in /run/kiln/ipam.
+- A container's rootfs is an overlay over the read-only base; per-container
+  layers live in /var/lib/kiln/containers/<id> and are removed on exit. Writes
+  inside a container never reach the base directory.
 - `pkill -f PATTERN` matches your own shell's command line; use `pkill -x NAME`.
   A container's PID 1 ignores SIGTERM, so clean up stray ones with `-9`.

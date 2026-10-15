@@ -2,7 +2,11 @@ package container
 
 import (
 	"bufio"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/netip"
 	"os"
@@ -26,7 +30,7 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "init":
-			err := Init(os.Args[2], os.Args[3], os.Args[4], os.Args[5:])
+			err := Init(os.Args[2], os.Args[3], os.Args[4], os.Args[5], os.Args[6:])
 			fmt.Fprintln(os.Stderr, "init:", err)
 			os.Exit(1)
 		case "escape":
@@ -35,6 +39,12 @@ func TestMain(m *testing.M) {
 			os.Exit(checkMounts())
 		case "net":
 			os.Exit(checkNet(os.Args[2], os.Args[3]))
+		case "write":
+			os.Exit(writeLayer())
+		case "pristine":
+			os.Exit(checkPristine())
+		case "own-writes":
+			os.Exit(checkOwnWrites())
 		case "hang":
 			time.Sleep(time.Hour)
 		case "run-hang": // act as a kiln process running a long container
@@ -91,10 +101,78 @@ func checkMounts() int {
 	seen := map[string]int{}
 	for _, m := range mounts {
 		seen[m.MountPoint]++
+		if m.MountPoint == "/" && m.FSType != "overlay" {
+			fmt.Fprintf(os.Stderr, "root is %s, want overlay\n", m.FSType)
+			return failed
+		}
 	}
 	want := map[string]int{"/": 1, "/proc": 1, "/dev": 1}
 	if fmt.Sprint(seen) != fmt.Sprint(want) {
 		fmt.Fprintf(os.Stderr, "mount points = %v, want %v\n", seen, want)
+		return escaped
+	}
+	return contained
+}
+
+// writeLayer changes the container's filesystem in every way overlayfs has to
+// handle: modify, create, delete, mkdir, chmod and rename.
+func writeLayer() int {
+	steps := []func() error{
+		func() error { return os.WriteFile("/etc/hostname", []byte("changed\n"), 0o644) },
+		func() error { return os.WriteFile("/tmp/new", []byte("new"), 0o644) },
+		func() error { return os.Remove("/etc/data") },
+		func() error { return os.Mkdir("/newdir", 0o755) },
+		func() error { return os.Chmod("/bin/kilntest", 0o700) },
+		func() error { return os.Rename("/etc/keep", "/etc/moved") },
+		func() error { return os.RemoveAll("/lib") }, // whole tree of shared libraries
+	}
+	for i, step := range steps {
+		if err := step(); err != nil {
+			fmt.Fprintf(os.Stderr, "step %d: %v\n", i, err)
+			return failed
+		}
+	}
+	return contained
+}
+
+// checkPristine verifies a container sees none of writeLayer's changes.
+func checkPristine() int {
+	problems := 0
+	report := func(format string, a ...any) { fmt.Fprintf(os.Stderr, format+"\n", a...); problems++ }
+	if b, _ := os.ReadFile("/etc/hostname"); string(b) != "kiln\n" {
+		report("/etc/hostname = %q", b)
+	}
+	for _, p := range []string{"/tmp/new", "/newdir", "/etc/moved"} {
+		if _, err := os.Lstat(p); err == nil {
+			report("%s exists", p)
+		}
+	}
+	for _, p := range []string{"/etc/data", "/etc/keep"} {
+		if _, err := os.Lstat(p); err != nil {
+			report("%s: %v", p, err)
+		}
+	}
+	if fi, err := os.Stat("/bin/kilntest"); err != nil || fi.Mode().Perm() != 0o755 {
+		report("/bin/kilntest mode: %v %v", fi, err)
+	}
+	if problems > 0 {
+		return failed
+	}
+	return contained
+}
+
+// checkOwnWrites writes a random token, waits so a concurrent container can
+// write its own, and checks the token is still ours.
+func checkOwnWrites() int {
+	tok := make([]byte, 8)
+	rand.Read(tok)
+	if err := os.WriteFile("/etc/data", tok, 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return failed
+	}
+	time.Sleep(500 * time.Millisecond)
+	if got, _ := os.ReadFile("/etc/data"); string(got) != string(tok) {
+		fmt.Fprintf(os.Stderr, "/etc/data = %x, wrote %x\n", got, tok)
 		return escaped
 	}
 	return contained
@@ -187,6 +265,11 @@ func newRootfs(t *testing.T) string {
 		}
 	}
 	copy(self, filepath.Join(dir, "bin", "kilntest"))
+	for name, content := range map[string]string{"etc/data": "orig", "etc/keep": "keep"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	out, _ := exec.Command("ldd", self).CombinedOutput()
 	for _, lib := range rootfs.ParseLdd(string(out)) {
 		copy(lib, filepath.Join(dir, lib))
@@ -391,4 +474,153 @@ func waitFor(cond func() bool) bool {
 		}
 	}
 	return false
+}
+
+// snapshot records every path in a tree with its type, mode and content hash.
+func snapshot(t *testing.T, root string) map[string]string {
+	t.Helper()
+	snap := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		entry := info.Mode().String()
+		switch {
+		case info.Mode().IsRegular():
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			sum := sha256.Sum256(data)
+			entry += " " + hex.EncodeToString(sum[:])
+		case info.Mode()&fs.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			entry += " -> " + target
+		}
+		rel, _ := filepath.Rel(root, path)
+		snap[rel] = entry
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snap
+}
+
+func TestBaseImageUnchanged(t *testing.T) {
+	requireRoot(t)
+	base := newRootfs(t)
+	before := snapshot(t, base)
+	if code := runIn(t, base, "/bin/kilntest", "write"); code != contained {
+		t.Fatalf("write: exit %d", code)
+	}
+	after := snapshot(t, base)
+	for p, v := range before {
+		if after[p] != v {
+			t.Errorf("base %s changed: %q -> %q", p, v, after[p])
+		}
+	}
+	for p := range after {
+		if _, ok := before[p]; !ok {
+			t.Errorf("base gained %s", p)
+		}
+	}
+	// A new container starts from the base again, not from the last layer.
+	if code := runIn(t, base, "/bin/kilntest", "pristine"); code != contained {
+		t.Fatalf("second container saw the first one's writes: exit %d", code)
+	}
+}
+
+func TestConcurrentLayersIsolated(t *testing.T) {
+	requireRoot(t)
+	base := newRootfs(t)
+	codes := make([]int, 3)
+	var wg sync.WaitGroup
+	for i := range codes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			code, err := Run(Config{ID: fmt.Sprintf("test-iso-%d", i), Rootfs: base, Hostname: "kilntest",
+				Args: []string{"/bin/kilntest", "own-writes"}})
+			if err != nil {
+				t.Error(err)
+			}
+			codes[i] = code
+		}()
+	}
+	wg.Wait()
+	for i, code := range codes {
+		if code != contained {
+			t.Errorf("container %d: exit %d", i, code)
+		}
+	}
+}
+
+func TestStateCleanup(t *testing.T) {
+	requireRoot(t)
+	// Left behind by a kiln process that was killed: its owner PID is dead.
+	dead := exec.Command("true")
+	if err := dead.Run(); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(StateDir, "test-stale")
+	if err := os.MkdirAll(filepath.Join(stale, "upper"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "owner"), []byte(fmt.Sprint(dead.Process.Pid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// One held by a live process (us) must survive.
+	live := filepath.Join(StateDir, "test-live")
+	if err := os.MkdirAll(live, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(live)
+	if err := os.WriteFile(filepath.Join(live, "owner"), []byte(fmt.Sprint(os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := newRootfs(t)
+	if code := runIn(t, dir, "/bin/kilntest", "write"); code != contained {
+		t.Fatalf("exit %d", code)
+	}
+	for _, d := range []string{stale, filepath.Join(StateDir, "test-"+filepath.Base(dir))} {
+		if _, err := os.Stat(d); !os.IsNotExist(err) {
+			t.Errorf("%s not removed: %v", d, err)
+		}
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Errorf("live state removed: %v", err)
+	}
+}
+
+func TestBaseWithAwkwardPath(t *testing.T) {
+	requireRoot(t)
+	odd := filepath.Join(t.TempDir(), `base,with:odd\chars`)
+	if err := os.Rename(newRootfs(t), odd); err != nil {
+		t.Fatal(err)
+	}
+	code, err := Run(Config{ID: "test-odd", Rootfs: odd, Hostname: "kilntest", Args: []string{"/bin/kilntest", "pristine"}})
+	if err != nil || code != contained {
+		t.Fatalf("Run = %d, %v", code, err)
+	}
+}
+
+func TestInvalidRootfsAndID(t *testing.T) {
+	requireRoot(t)
+	if _, err := Run(Config{ID: "x", Rootfs: "/nonexistent", Args: []string{"sh"}}); err == nil {
+		t.Error("missing rootfs accepted")
+	}
+	for _, id := range []string{"", "..", "a/b"} {
+		if _, err := Run(Config{ID: id, Rootfs: "/", Args: []string{"sh"}}); err == nil {
+			t.Errorf("container ID %q accepted", id)
+		}
+	}
 }

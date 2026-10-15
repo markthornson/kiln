@@ -9,7 +9,7 @@ import (
 )
 
 // DefaultBinaries is a small toolbox that makes a rootfs usable interactively.
-var DefaultBinaries = []string{"sh", "ls", "cat", "echo", "ps", "hostname", "mount", "id", "sleep", "head", "seq"}
+var DefaultBinaries = []string{"sh", "ls", "cat", "echo", "ps", "hostname", "mount", "id", "sleep", "head", "seq", "rm", "mkdir", "touch", "true"}
 
 // Build creates a rootfs at dir containing the named host binaries (resolved
 // via $PATH) plus every shared library they need.
