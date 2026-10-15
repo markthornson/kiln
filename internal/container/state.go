@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/markthornson/kiln/internal/cgroups"
 )
 
 // StateDir holds one directory per running container:
@@ -46,10 +48,25 @@ func newState(id string) (string, error) {
 	return dir, nil
 }
 
-// pruneStale removes state directories whose owning kiln process has exited.
-// Their containers are gone too: Run sets Pdeathsig, so a container dies with
-// its kiln process, and the overlay was only mounted in its namespace.
+// pruneStale removes what kiln processes that died without cleaning up left
+// behind. Their containers are gone too: Run sets Pdeathsig, so a container
+// dies with its kiln process, and the overlay was only mounted in its
+// namespace.
 func pruneStale() {
+	pruneStaleState()
+	// Run creates a container's state directory before its cgroup and removes
+	// it after, so a kiln cgroup with no state directory is left over from a
+	// killed kiln. Removing one that still has processes fails harmlessly.
+	for _, id := range cgroups.IDs() {
+		if _, err := os.Stat(filepath.Join(StateDir, id)); errors.Is(err, os.ErrNotExist) {
+			cgroups.Remove(id)
+		}
+	}
+}
+
+// pruneStaleState removes state directories whose owning kiln process has
+// exited.
+func pruneStaleState() {
 	entries, err := os.ReadDir(StateDir)
 	if err != nil {
 		return

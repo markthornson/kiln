@@ -9,6 +9,8 @@ package network
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -67,25 +69,38 @@ func Attach(id string, pid int) (*Attachment, error) {
 		return nil, err
 	}
 	a := &Attachment{
-		HostLink: hostLinkName(id),
+		HostLink: HostLinkName(id),
 		Spec:     Spec{Addr: netip.PrefixFrom(addr, Subnet.Bits()), Gateway: Gateway(Subnet)},
 	}
-	if err := a.create(pid); err != nil {
-		a.Detach()
+	created, err := a.create(pid)
+	if err != nil {
+		// Only delete the link if we made it: if creation failed, a link
+		// with this name may belong to another container.
+		if created {
+			a.Detach()
+		} else {
+			leases.Release(addr)
+		}
 		return nil, err
 	}
 	return a, nil
 }
 
-func (a *Attachment) create(pid int) error {
+// create makes and plugs in the veth pair. created reports whether the link
+// now exists and is ours to delete.
+func (a *Attachment) create(pid int) (created bool, err error) {
 	c, err := netlink.Dial()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer c.Close()
 	if err := c.CreateVeth(a.HostLink, ContainerLink, pid); err != nil {
-		return fmt.Errorf("create veth %s: %w", a.HostLink, err)
+		return false, fmt.Errorf("create veth %s: %w", a.HostLink, err)
 	}
+	return true, a.plugIn(c)
+}
+
+func (a *Attachment) plugIn(c *netlink.Conn) error {
 	if err := c.SetMaster(a.HostLink, Bridge); err != nil {
 		return fmt.Errorf("attach %s to %s: %w", a.HostLink, Bridge, err)
 	}
@@ -114,12 +129,13 @@ func (a *Attachment) Detach() error {
 	return first
 }
 
-func hostLinkName(id string) string {
-	name := "kv" + id
-	if len(name) > maxLinkName {
-		name = name[:maxLinkName]
-	}
-	return name
+// HostLinkName derives the host end's name from a hash of the container ID:
+// interface names are limited to 15 bytes and may not contain '/', ':' or
+// whitespace, while IDs can be any length and contain anything. Truncating
+// the ID instead made IDs sharing a prefix collide.
+func HostLinkName(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return "kv" + hex.EncodeToString(sum[:])[:maxLinkName-2]
 }
 
 // Spec is what the container needs to configure its side: its address and

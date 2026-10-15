@@ -99,3 +99,23 @@ func (g *Group) Destroy() error {
 }
 
 func (g *Group) dir(ctrl string) string { return filepath.Join(Root, ctrl, g.name) }
+
+// IDs lists the container IDs that have a kiln group under any controller.
+func IDs() []string {
+	seen := map[string]bool{}
+	var ids []string
+	for _, ctrl := range []string{"memory", "pids"} {
+		entries, _ := os.ReadDir(filepath.Join(Root, ctrl, "kiln"))
+		for _, e := range entries {
+			if e.IsDir() && !seen[e.Name()] {
+				seen[e.Name()] = true
+				ids = append(ids, e.Name())
+			}
+		}
+	}
+	return ids
+}
+
+// Remove deletes the group of container id. It fails, harmlessly, while the
+// group still has processes.
+func Remove(id string) error { return (&Group{name: filepath.Join("kiln", id)}).Destroy() }

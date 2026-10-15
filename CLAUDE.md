@@ -14,7 +14,8 @@ Long-term learning project: a homelab platform (container runtime → scheduler
 
 ## Commands
 
-    go vet ./... && go test ./...
+    go vet ./... && go vet -tags integration ./... && go test ./...
+    go test -tags integration ./...      # real containers; needs root
     go test ./internal/rootfs -run='^$' -fuzz=FuzzParseLdd -fuzztime=30s
     go test ./internal/mountinfo -run='^$' -fuzz=FuzzParseLine -fuzztime=30s
     go test ./internal/network -run='^$' -fuzz=FuzzLeases -fuzztime=30s
@@ -28,9 +29,15 @@ Long-term learning project: a homelab platform (container runtime → scheduler
   build rootfs from host binaries with `kiln rootfs`.
 - Go processes are multi-threaded: anything joining a pids-limited cgroup must
   do so right before exec (see cgroups.Joiner).
-- internal/container tests run real containers: the test binary is re-executed
-  as the container's init (see TestMain) and copied into the rootfs as
-  /bin/kilntest to act as the workload. They skip when not root.
+- Tests that need root or touch the host (real containers, real mounts) go in
+  `*integration_test.go` files with `//go:build integration`, and fail (not
+  skip) without root. Everything else must pass as an ordinary user.
+- internal/container integration tests run real containers: the test binary is
+  re-executed as the container's init (see TestMain) and copied into the rootfs
+  as /bin/kilntest to act as the workload. Limit tests use /bin/sh instead,
+  because pids.max counts the Go runtime's threads.
+- When adding a safeguard, check its test fails with the safeguard removed
+  (and that the mutant still compiles).
 - iproute2 (`ip`) is not installed; use internal/netlink, or read /sys/class/net
   and /proc/net/*. Network tests create the host's kiln0 bridge and use leases
   in /run/kiln/ipam.

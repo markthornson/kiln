@@ -11,7 +11,7 @@ property test, and the README updated (including the "Bugs found" table).
 - [x] M1.4 `pivot_root` instead of chroot (chroot is escapable)
 - [x] M1.5 Network namespace + veth pair + bridge, so containers get an IP
 - [x] M1.6 Overlay filesystem: read-only base image + per-container writable layer
-- [ ] M1.7 Integration test suite (`go test -tags integration`, needs root): isolation, limits, cleanup
+- [x] M1.7 Integration test suite (`go test -tags integration`, needs root): isolation, limits, cleanup
 - [ ] M1.8 cgroup v2 support, detected at runtime
 - [ ] M1.9 Drop capabilities + seccomp filter; test that escape attempts fail
 

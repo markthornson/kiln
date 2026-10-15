@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -178,10 +179,28 @@ func FuzzParseSpec(f *testing.F) {
 }
 
 func TestHostLinkName(t *testing.T) {
-	if got := hostLinkName("0123456789abcdef"); len(got) > maxLinkName {
-		t.Errorf("hostLinkName too long: %q", got)
+	// IDs that differ only past the 15-byte interface name limit.
+	a, b := HostLinkName("test-shared-prefix-aaaa"), HostLinkName("test-shared-prefix-bbbb")
+	if a == b {
+		t.Errorf("IDs sharing a prefix collide: %q", a)
 	}
-	if got := hostLinkName("a1b2c3d4e5f6"); got != "kva1b2c3d4e5f6" {
-		t.Errorf("hostLinkName = %q", got)
+	if HostLinkName("x") != HostLinkName("x") {
+		t.Error("HostLinkName is not deterministic")
 	}
+}
+
+// FuzzHostLinkName: any container ID yields a valid interface name.
+func FuzzHostLinkName(f *testing.F) {
+	f.Add("a1b2c3d4e5f6")
+	f.Add("with/slash:colon and space")
+	f.Add("")
+	f.Fuzz(func(t *testing.T, id string) {
+		name := HostLinkName(id)
+		if len(name) == 0 || len(name) > maxLinkName {
+			t.Fatalf("HostLinkName(%q) = %q: length %d", id, name, len(name))
+		}
+		if strings.ContainsAny(name, "/: \t\n\x00") || name == "." || name == ".." {
+			t.Fatalf("HostLinkName(%q) = %q: invalid interface name", id, name)
+		}
+	})
 }
