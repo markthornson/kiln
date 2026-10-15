@@ -16,6 +16,7 @@ Long-term learning project: a homelab platform (container runtime → scheduler
 
     go vet ./... && go test ./...
     go test ./internal/rootfs -run='^$' -fuzz=FuzzParseLdd -fuzztime=30s
+    go test ./internal/mountinfo -run='^$' -fuzz=FuzzParseLine -fuzztime=30s
     go build -o kiln ./cmd/kiln && ./kiln rootfs /tmp/rfs && ./kiln run /tmp/rfs sh
 
 ## Environment notes (cloud sandbox)
@@ -25,3 +26,6 @@ Long-term learning project: a homelab platform (container runtime → scheduler
   build rootfs from host binaries with `kiln rootfs`.
 - Go processes are multi-threaded: anything joining a pids-limited cgroup must
   do so right before exec (see cgroups.Joiner).
+- internal/container tests run real containers: the test binary is re-executed
+  as the container's init (see TestMain) and copied into the rootfs as
+  /bin/kilntest to act as the workload. They skip when not root.

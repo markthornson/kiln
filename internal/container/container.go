@@ -2,7 +2,7 @@
 //
 // The parent creates a cgroup, then re-executes /proc/self/exe with the hidden
 // "init" subcommand inside fresh UTS, PID and mount namespaces. That child
-// sets the hostname, chroots into the rootfs, mounts /proc and /dev, joins the
+// sets the hostname, pivots into the rootfs, mounts /proc and /dev, joins the
 // cgroup and execs the command.
 package container
 
@@ -64,7 +64,7 @@ func Init(id, rootfs, hostname string, args []string) error {
 	}
 	// Keep this goroutine on one thread so nothing migrates mid-setup.
 	runtime.LockOSThread()
-	// Opened before chroot, used just before exec; see Joiner.JoinSelf.
+	// Opened before pivot_root, used just before exec; see Joiner.JoinSelf.
 	cg, err := cgroups.OpenJoiner(id)
 	if err != nil {
 		return err
@@ -76,10 +76,7 @@ func Init(id, rootfs, hostname string, args []string) error {
 	if err := syscall.Mount("", "/", "", syscall.MS_PRIVATE|syscall.MS_REC, ""); err != nil {
 		return fmt.Errorf("make / private: %w", err)
 	}
-	if err := syscall.Chroot(rootfs); err != nil {
-		return fmt.Errorf("chroot: %w", err)
-	}
-	if err := os.Chdir("/"); err != nil {
+	if err := enterRootfs(rootfs); err != nil {
 		return err
 	}
 	if err := syscall.Mount("proc", "/proc", "proc", 0, ""); err != nil {
@@ -99,4 +96,26 @@ func Init(id, rootfs, hostname string, args []string) error {
 		return err
 	}
 	return syscall.Exec(path, args, []string{"PATH=/bin", "HOME=/", "PS1=kiln# "})
+}
+
+// enterRootfs makes rootfs the root mount of this mount namespace and detaches
+// the old root. Unlike chroot, which only changes the path lookup start, this
+// leaves no mount of the host filesystem for the process to climb back to.
+func enterRootfs(rootfs string) error {
+	// pivot_root requires the new root to be a mount point.
+	if err := syscall.Mount(rootfs, rootfs, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
+		return fmt.Errorf("bind mount rootfs: %w", err)
+	}
+	if err := os.Chdir(rootfs); err != nil {
+		return err
+	}
+	// pivot_root(".", ".") stacks the old root on top of the new one, so the
+	// rootfs needs no directory to hold it; unmounting "." then removes it.
+	if err := syscall.PivotRoot(".", "."); err != nil {
+		return fmt.Errorf("pivot_root: %w", err)
+	}
+	if err := syscall.Unmount(".", syscall.MNT_DETACH); err != nil {
+		return fmt.Errorf("detach old root: %w", err)
+	}
+	return os.Chdir("/")
 }

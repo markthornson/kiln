@@ -47,7 +47,7 @@ func New(id string, l Limits) (*Group, error) {
 }
 
 // Joiner holds open handles to a group's cgroup.procs files so a process can
-// join after it has chrooted away from /sys/fs/cgroup.
+// join after it has pivoted away from /sys/fs/cgroup.
 type Joiner []*os.File
 
 // OpenJoiner opens the cgroup.procs files of the group named by id (as
