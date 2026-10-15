@@ -44,5 +44,10 @@ Long-term learning project: a homelab platform (container runtime → scheduler
 - A container's rootfs is an overlay over the read-only base; per-container
   layers live in /var/lib/kiln/containers/<id> and are removed on exit. Writes
   inside a container never reach the base directory.
+- Containers are hardened just before exec (internal/seccomp): all capabilities
+  dropped, no_new_privs set, seccomp-BPF filter installed. chroot/mount/mknod
+  etc. are blocked, so tests or workloads that need them must run on the host,
+  not in a container. The seccomp filter is pure data: unit-test/fuzz it with
+  the BPF interpreter in seccomp_test.go, no root needed.
 - `pkill -f PATTERN` matches your own shell's command line; use `pkill -x NAME`.
   A container's PID 1 ignores SIGTERM, so clean up stray ones with `-9`.

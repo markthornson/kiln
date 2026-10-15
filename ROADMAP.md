@@ -13,7 +13,7 @@ property test, and the README updated (including the "Bugs found" table).
 - [x] M1.6 Overlay filesystem: read-only base image + per-container writable layer
 - [x] M1.7 Integration test suite (`go test -tags integration`, needs root): isolation, limits, cleanup
 - [ ] M1.8 cgroup v2 support, detected at runtime
-- [ ] M1.9 Drop capabilities + seccomp filter; test that escape attempts fail
+- [x] M1.9 Drop capabilities + seccomp filter; test that escape attempts fail
 
 ## Phase 2: Job scheduler
 
@@ -40,8 +40,10 @@ property test, and the README updated (including the "Bugs found" table).
 ## Known limitations / ideas
 
 - The runtime needs root; rootless via user namespaces would be a nice stretch goal.
-- Until M1.9, the container process keeps every capability: `pivot_root` stops the
-  chroot breakout, but a root process could still e.g. `mknod` the host disk and mount it.
+- The container drops all capabilities and runs under a seccomp filter (M1.9), so it
+  cannot mount, create device nodes, load modules, etc. The filter is a blocklist, not
+  the tighter allowlist a production runtime would use, and there is no user namespace,
+  so the container's "root" is still real uid 0 on the host.
 - Networking is IPv4-only on one fixed subnet (10.88.0.0/24), with no NAT/masquerade to
   the outside, no port publishing and no DNS. Containers reach the host and each other only.
 - Images are a single directory (one lower layer). There is no layered image format, and a

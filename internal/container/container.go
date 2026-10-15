@@ -6,7 +6,8 @@
 // the child its address over a pipe (fd 3). The child configures its network,
 // sets the hostname, mounts an overlay of a fresh writable layer over the
 // read-only base rootfs, pivots into it, mounts /proc and /dev, joins the
-// cgroup and execs the command.
+// cgroup, drops all capabilities and installs a seccomp filter, and execs the
+// command.
 package container
 
 import (
@@ -20,6 +21,7 @@ import (
 	"github.com/markthornson/kiln/internal/cgroups"
 	"github.com/markthornson/kiln/internal/network"
 	"github.com/markthornson/kiln/internal/overlay"
+	"github.com/markthornson/kiln/internal/seccomp"
 )
 
 // Network modes.
@@ -179,6 +181,14 @@ func Init(id, base, state, hostname string, args []string) error {
 		return err
 	}
 	if err := cg.JoinSelf(); err != nil {
+		return err
+	}
+	// Last, after every privileged step above: drop all capabilities and
+	// install the seccomp filter. From here the process (and the command it
+	// is about to exec) can do no more than an unprivileged user, and cannot
+	// regain privilege. execve collapses to this one thread, carrying its
+	// hardened state to the new program; see the Joiner note above.
+	if err := seccomp.DropPrivileges(); err != nil {
 		return err
 	}
 	env := []string{"PATH=/bin", "HOME=/", "PS1=kiln# "}

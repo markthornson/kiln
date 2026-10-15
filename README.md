@@ -24,6 +24,7 @@ sudo ./kiln run -memory 20000000 /tmp/rfs sh -c 'x=a; while :; do x=$x$x; done' 
 sudo ./kiln run /tmp/rfs sh -c 'echo $KILN_IP; cat /proc/net/route'   # eth0 on the kiln0 bridge
 sudo ./kiln run -net none /tmp/rfs cat /proc/net/dev                    # loopback only
 sudo ./kiln run /tmp/rfs sh -c 'rm /bin/ls; echo hi > /etc/hostname'    # ...then /tmp/rfs is untouched
+sudo ./kiln run /tmp/rfs mount -t tmpfs none /tmp                       # "permission denied": blocked
 ```
 
 ### Filesystem
@@ -42,6 +43,21 @@ The layer is deleted when the container exits; layers left by a killed kiln
 process are pruned on the next run. Paths are escaped for the overlay options
 string (`,` `:` `\`), so a base path like `/images/a,b` works and `/a:/b` can't
 be misread as two layers.
+
+### Security
+
+The container runs with no Linux capabilities, `no_new_privs` set (so no later
+`execve` can regain privilege), and a seccomp-BPF filter. The filter
+(`internal/netlink`-style, built from raw BPF in `internal/seccomp`) denies a
+blocklist of syscalls with `EPERM` — `mount`, `umount2`, `pivot_root`,
+`chroot`, `mknod`, module loading, `reboot`, `kexec`, `swapon`, `setns`,
+`unshare`, `ptrace`, `bpf`, `perf_event_open` — while allowing everything an
+ordinary workload needs. The capability drop and filter are installed as the
+very last step before `execve`, after all privileged setup is done.
+
+This is defence in depth: the container's namespaces already stop most of
+these, but the filter blocks them a second way, keeps them blocked no matter
+what the process does later, and shrinks the reachable kernel surface.
 
 ### Networking
 
@@ -71,11 +87,13 @@ go test ./cmd/kiln -run='^$' -fuzz=FuzzParseRun -fuzztime=30s
 go test ./internal/netlink -run='^$' -fuzz=FuzzAttrsRoundTrip -fuzztime=30s
 go test ./internal/network -run='^$' -fuzz=FuzzLeases -fuzztime=30s
 go test ./internal/overlay -run='^$' -fuzz=FuzzOptionsRoundTrip -fuzztime=30s
+go test ./internal/seccomp -run='^$' -fuzz=FuzzProgram -fuzztime=30s
 ```
 
 Fuzz targets: `FuzzParseLdd`, `FuzzParseLine`, `FuzzEscapeRoundTrip`,
 `FuzzParseRun`, `FuzzAttrsRoundTrip`, `FuzzMessagesRoundTrip`, `FuzzPick`,
-`FuzzLeases`, `FuzzParseSpec`, `FuzzOptionsRoundTrip`, `FuzzHostLinkName`.
+`FuzzLeases`, `FuzzParseSpec`, `FuzzOptionsRoundTrip`, `FuzzHostLinkName`,
+`FuzzProgram`.
 
 The integration suite (`-tags integration`) runs real containers and fails,
 rather than skips, without root. It covers:
@@ -83,6 +101,10 @@ rather than skips, without root. It covers:
 - **Isolation**: chroot-style escape attempts, PID/UTS/mount/network
   namespaces, only the container's mounts visible, overlay layers private to
   each container and the base image byte-for-byte unchanged.
+- **Hardening**: inside a container, all capability sets and the bounding set
+  are empty, `no_new_privs` is on, a seccomp filter is installed, and
+  privileged syscalls (`mount`, `mknod`, `sethostname`) return `EPERM`; an
+  ordinary workload still runs.
 - **Limits**: a property test that `pids.max = N` allows exactly N-1 children
   for random N; OOM kill (exit 137) above the memory limit and success below
   it; the limits as written in the cgroup files; exit codes.

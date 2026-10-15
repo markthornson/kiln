@@ -49,6 +49,10 @@ func TestMain(m *testing.M) {
 			os.Exit(checkPristine())
 		case "own-writes":
 			os.Exit(checkOwnWrites())
+		case "hardened":
+			os.Exit(checkHardened())
+		case "blocked-syscalls":
+			os.Exit(checkBlockedSyscalls())
 		case "hang":
 			time.Sleep(time.Hour)
 		case "run-hang": // act as a kiln process running a long container
@@ -71,12 +75,20 @@ const (
 // tryEscape is the classic chroot breakout: chroot into a subdirectory
 // without moving the working directory, walk ".." past the root, and chroot
 // there. It reports whether hostFile (outside the rootfs) became visible.
+//
+// There are two independent defences. The seccomp filter blocks chroot
+// outright, so the breakout cannot even begin (EPERM at the first chroot);
+// that alone is contained. If chroot were somehow allowed, pivot_root has
+// already detached the host root, so ".." cannot reach it either.
 func tryEscape(hostFile string) int {
 	if err := os.Mkdir("/breakout", 0o755); err != nil && !os.IsExist(err) {
 		fmt.Fprintln(os.Stderr, err)
 		return failed
 	}
 	if err := syscall.Chroot("/breakout"); err != nil {
+		if err == syscall.EPERM {
+			return contained // blocked by the seccomp filter
+		}
 		fmt.Fprintln(os.Stderr, "chroot:", err)
 		return failed
 	}
