@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -94,16 +95,26 @@ func TestLimitsWrittenToCgroup(t *testing.T) {
 		}
 		done <- code
 	}()
-	current := "pids/kiln/" + id + "/pids.current"
+	// Limit files differ by hierarchy: v1 has a tree per controller and names
+	// the memory limit memory.limit_in_bytes; v2 is unified and uses memory.max.
+	memPath := filepath.Join(cgroups.Root, "memory", "kiln", id, "memory.limit_in_bytes")
+	pidsMax := filepath.Join(cgroups.Root, "pids", "kiln", id, "pids.max")
+	current := filepath.Join(cgroups.Root, "pids", "kiln", id, "pids.current")
+	if cgroups.Version() == 2 {
+		leaf := filepath.Join(cgroups.Root, "kiln", id)
+		memPath = filepath.Join(leaf, "memory.max")
+		pidsMax = filepath.Join(leaf, "pids.max")
+		current = filepath.Join(leaf, "pids.current")
+	}
 	files := map[string]string{
-		"memory/kiln/" + id + "/memory.limit_in_bytes": strconv.FormatInt(limits.MemoryBytes, 10),
-		"pids/kiln/" + id + "/pids.max":                strconv.FormatInt(limits.MaxPids, 10),
-		current:                                        "1", // just sleep: init's threads collapsed at exec
+		memPath: strconv.FormatInt(limits.MemoryBytes, 10),
+		pidsMax: strconv.FormatInt(limits.MaxPids, 10),
+		current: "1", // just sleep: init's threads collapsed at exec
 	}
 	got := map[string]string{}
 	read := func() bool {
 		for f := range files {
-			b, err := os.ReadFile(filepath.Join(cgroups.Root, f))
+			b, err := os.ReadFile(f)
 			if err != nil {
 				return false
 			}
@@ -122,10 +133,8 @@ func TestLimitsWrittenToCgroup(t *testing.T) {
 	if code := <-done; code != 0 {
 		t.Errorf("exit %d", code)
 	}
-	for _, ctrl := range []string{"memory", "pids"} {
-		if _, err := os.Stat(filepath.Join(cgroups.Root, ctrl, "kiln", id)); !os.IsNotExist(err) {
-			t.Errorf("%s cgroup not removed: %v", ctrl, err)
-		}
+	if slices.Contains(cgroups.IDs(), id) {
+		t.Errorf("cgroup %s not removed after the container exited", id)
 	}
 }
 
@@ -187,11 +196,8 @@ func captureHost(t *testing.T) hostState {
 		}
 		return names
 	}
-	for _, ctrl := range []string{"memory", "pids"} {
-		for _, n := range list(filepath.Join(cgroups.Root, ctrl, "kiln"), os.DirEntry.IsDir) {
-			s.cgroups = append(s.cgroups, ctrl+"/"+n)
-		}
-	}
+	s.cgroups = cgroups.IDs()
+	slices.Sort(s.cgroups)
 	s.state = list(StateDir, func(os.DirEntry) bool { return true })
 	// Leases of dead kiln processes are reclaimed on use, so only live ones count.
 	s.leases = list(network.LeaseDir, func(e os.DirEntry) bool {

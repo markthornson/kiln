@@ -12,7 +12,7 @@ property test, and the README updated (including the "Bugs found" table).
 - [x] M1.5 Network namespace + veth pair + bridge, so containers get an IP
 - [x] M1.6 Overlay filesystem: read-only base image + per-container writable layer
 - [x] M1.7 Integration test suite (`go test -tags integration`, needs root): isolation, limits, cleanup
-- [ ] M1.8 cgroup v2 support, detected at runtime
+- [x] M1.8 cgroup v2 support, detected at runtime
 - [x] M1.9 Drop capabilities + seccomp filter; test that escape attempts fail
 
 ## Phase 2: Job scheduler
@@ -48,4 +48,5 @@ property test, and the README updated (including the "Bugs found" table).
   the outside, no port publishing and no DNS. Containers reach the host and each other only.
 - Images are a single directory (one lower layer). There is no layered image format, and a
   container's writable layer is discarded on exit (no `commit` or `diff`).
-- Only cgroup v1 is supported so far (the dev sandbox uses v1).
+- Both cgroup hierarchies are supported, chosen at runtime (M1.8); the dev sandbox is v1,
+  so the v2 path is covered by unit tests against a temp hierarchy, not a live v2 mount.

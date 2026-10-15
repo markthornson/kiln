@@ -253,8 +253,11 @@ func requireRoot(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Fatal("integration tests need root: sudo go test -tags integration ./...")
 	}
+	if cgroups.Version() == 2 {
+		return // unified hierarchy; New enables controllers per subtree
+	}
 	for _, ctrl := range []string{"memory", "pids"} {
-		if _, err := os.Stat("/sys/fs/cgroup/" + ctrl); err != nil {
+		if _, err := os.Stat(filepath.Join(cgroups.Root, ctrl)); err != nil {
 			t.Fatalf("integration tests need the cgroup v1 %s controller: %v", ctrl, err)
 		}
 	}

@@ -44,6 +44,16 @@ process are pruned on the next run. Paths are escaped for the overlay options
 string (`,` `:` `\`), so a base path like `/images/a,b` works and `/a:/b` can't
 be misread as two layers.
 
+### Resource limits
+
+`-memory` and `-pids` cap a container's memory and process count with cgroups.
+kiln detects the hierarchy at runtime (`internal/cgroups`): cgroup v1, with a
+separate tree per controller, or the unified cgroup v2, where each container's
+directory carries every controller and a parent enables them for its children
+through `cgroup.subtree_control`. The limit it writes differs too
+(`memory.limit_in_bytes` on v1, `memory.max` on v2); `kiln run` is the same
+either way.
+
 ### Security
 
 The container runs with no Linux capabilities, `no_new_privs` set (so no later
@@ -80,7 +90,7 @@ no NAT to the outside world yet.
 
 ```sh
 go test ./...                              # unit tests, fuzz seeds: no root needed
-sudo go test -tags integration ./...       # real containers: needs root + cgroup v1
+sudo go test -tags integration ./...       # real containers: needs root + cgroups
 go test ./internal/rootfs -run='^$' -fuzz=FuzzParseLdd -fuzztime=30s
 go test ./internal/mountinfo -run='^$' -fuzz=FuzzParseLine -fuzztime=30s
 go test ./cmd/kiln -run='^$' -fuzz=FuzzParseRun -fuzztime=30s
@@ -88,12 +98,13 @@ go test ./internal/netlink -run='^$' -fuzz=FuzzAttrsRoundTrip -fuzztime=30s
 go test ./internal/network -run='^$' -fuzz=FuzzLeases -fuzztime=30s
 go test ./internal/overlay -run='^$' -fuzz=FuzzOptionsRoundTrip -fuzztime=30s
 go test ./internal/seccomp -run='^$' -fuzz=FuzzProgram -fuzztime=30s
+go test ./internal/cgroups -run='^$' -fuzz=FuzzLimitsRoundTrip -fuzztime=30s
 ```
 
 Fuzz targets: `FuzzParseLdd`, `FuzzParseLine`, `FuzzEscapeRoundTrip`,
 `FuzzParseRun`, `FuzzAttrsRoundTrip`, `FuzzMessagesRoundTrip`, `FuzzPick`,
 `FuzzLeases`, `FuzzParseSpec`, `FuzzOptionsRoundTrip`, `FuzzHostLinkName`,
-`FuzzProgram`.
+`FuzzProgram`, `FuzzLimitsRoundTrip`.
 
 The integration suite (`-tags integration`) runs real containers and fails,
 rather than skips, without root. It covers:

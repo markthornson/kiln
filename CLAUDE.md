@@ -20,11 +20,14 @@ Long-term learning project: a homelab platform (container runtime → scheduler
     go test ./internal/mountinfo -run='^$' -fuzz=FuzzParseLine -fuzztime=30s
     go test ./internal/network -run='^$' -fuzz=FuzzLeases -fuzztime=30s
     go test ./internal/overlay -run='^$' -fuzz=FuzzOptionsRoundTrip -fuzztime=30s
+    go test ./internal/cgroups -run='^$' -fuzz=FuzzLimitsRoundTrip -fuzztime=30s
     go build -o kiln ./cmd/kiln && ./kiln rootfs /tmp/rfs && ./kiln run /tmp/rfs sh
 
 ## Environment notes (cloud sandbox)
 
 - Runs as root; namespaces work; cgroups are **v1** at /sys/fs/cgroup/{memory,pids,...}.
+  kiln supports v1 and v2 (internal/cgroups, cgroups.Version()); only v1 can be
+  exercised here, so the v2 path is unit-tested against a temp hierarchy.
 - No Docker daemon and no /dev/kvm. Image CDNs (e.g. Alpine) are blocked, so
   build rootfs from host binaries with `kiln rootfs`.
 - Go processes are multi-threaded: anything joining a pids-limited cgroup must
