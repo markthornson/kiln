@@ -1,7 +1,9 @@
 // Package container runs a command in isolated Linux namespaces.
 //
 // The parent creates a cgroup, then re-executes /proc/self/exe with the hidden
-// "init" subcommand inside fresh UTS, PID and mount namespaces. That child
+// "init" subcommand inside fresh UTS, PID, mount and network namespaces. The
+// parent connects the child's network namespace to the host bridge and sends
+// the child its address over a pipe (fd 3). The child configures its network,
 // sets the hostname, pivots into the rootfs, mounts /proc and /dev, joins the
 // cgroup and execs the command.
 package container
@@ -14,6 +16,13 @@ import (
 	"syscall"
 
 	"github.com/markthornson/kiln/internal/cgroups"
+	"github.com/markthornson/kiln/internal/network"
+)
+
+// Network modes.
+const (
+	NetworkNone   = "none"   // own namespace with loopback only
+	NetworkBridge = "bridge" // plus eth0 on the kiln0 bridge
 )
 
 // Config describes one container run.
@@ -23,6 +32,7 @@ type Config struct {
 	Hostname string
 	Args     []string
 	Limits   cgroups.Limits
+	Network  string // NetworkNone (also the zero value) or NetworkBridge
 }
 
 // Run starts the container, waits for it and returns its exit code.
@@ -30,7 +40,20 @@ func Run(c Config) (int, error) {
 	cmd := exec.Command("/proc/self/exe", append([]string{"init", c.ID, c.Rootfs, c.Hostname}, c.Args...)...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS,
+		Cloneflags: syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET,
+		// If kiln dies (even by SIGKILL), take the container with it. Otherwise
+		// it would keep running with an IP whose lease, owned by kiln's PID,
+		// looks stale and gets handed to the next container.
+		Pdeathsig: syscall.SIGKILL,
+	}
+	switch c.Network {
+	case "", NetworkNone:
+	case NetworkBridge:
+		if err := network.EnsureBridge(); err != nil {
+			return -1, err
+		}
+	default:
+		return -1, fmt.Errorf("unknown network mode %q", c.Network)
 	}
 
 	group, err := cgroups.New(c.ID, c.Limits)
@@ -39,9 +62,37 @@ func Run(c Config) (int, error) {
 	}
 	defer group.Destroy()
 
-	if err := cmd.Start(); err != nil {
+	// The child blocks reading this pipe until its network is attached.
+	syncR, syncW, err := os.Pipe()
+	if err != nil {
+		return -1, err
+	}
+	defer syncW.Close()
+	cmd.ExtraFiles = []*os.File{syncR} // fd 3 in the child
+	err = cmd.Start()
+	syncR.Close()
+	if err != nil {
 		return -1, fmt.Errorf("start: %w", err)
 	}
+
+	var spec network.Spec
+	if c.Network == NetworkBridge {
+		att, err := network.Attach(c.ID, cmd.Process.Pid)
+		if err != nil {
+			cmd.Process.Kill()
+			cmd.Wait()
+			return -1, err
+		}
+		defer att.Detach()
+		spec = att.Spec
+	}
+	if _, err := fmt.Fprintln(syncW, spec); err != nil {
+		cmd.Process.Kill()
+		cmd.Wait()
+		return -1, fmt.Errorf("signal container: %w", err)
+	}
+	syncW.Close()
+
 	err = cmd.Wait()
 	if exitErr, ok := err.(*exec.ExitError); ok {
 		// Like a shell, report death-by-signal as 128+signal.
@@ -64,6 +115,16 @@ func Init(id, rootfs, hostname string, args []string) error {
 	}
 	// Keep this goroutine on one thread so nothing migrates mid-setup.
 	runtime.LockOSThread()
+	// Wait for the parent to attach our network namespace (see Run).
+	sync := os.NewFile(3, "sync")
+	spec, err := network.ReadSpec(sync)
+	sync.Close()
+	if err != nil {
+		return err
+	}
+	if err := network.ConfigureContainer(spec); err != nil {
+		return err
+	}
 	// Opened before pivot_root, used just before exec; see Joiner.JoinSelf.
 	cg, err := cgroups.OpenJoiner(id)
 	if err != nil {
@@ -95,7 +156,11 @@ func Init(id, rootfs, hostname string, args []string) error {
 	if err := cg.JoinSelf(); err != nil {
 		return err
 	}
-	return syscall.Exec(path, args, []string{"PATH=/bin", "HOME=/", "PS1=kiln# "})
+	env := []string{"PATH=/bin", "HOME=/", "PS1=kiln# "}
+	if spec.Addr.IsValid() {
+		env = append(env, "KILN_IP="+spec.Addr.Addr().String())
+	}
+	return syscall.Exec(path, args, env)
 }
 
 // enterRootfs makes rootfs the root mount of this mount namespace and detaches

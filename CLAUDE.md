@@ -17,6 +17,7 @@ Long-term learning project: a homelab platform (container runtime → scheduler
     go vet ./... && go test ./...
     go test ./internal/rootfs -run='^$' -fuzz=FuzzParseLdd -fuzztime=30s
     go test ./internal/mountinfo -run='^$' -fuzz=FuzzParseLine -fuzztime=30s
+    go test ./internal/network -run='^$' -fuzz=FuzzLeases -fuzztime=30s
     go build -o kiln ./cmd/kiln && ./kiln rootfs /tmp/rfs && ./kiln run /tmp/rfs sh
 
 ## Environment notes (cloud sandbox)
@@ -29,3 +30,8 @@ Long-term learning project: a homelab platform (container runtime → scheduler
 - internal/container tests run real containers: the test binary is re-executed
   as the container's init (see TestMain) and copied into the rootfs as
   /bin/kilntest to act as the workload. They skip when not root.
+- iproute2 (`ip`) is not installed; use internal/netlink, or read /sys/class/net
+  and /proc/net/*. Network tests create the host's kiln0 bridge and use leases
+  in /run/kiln/ipam.
+- `pkill -f PATTERN` matches your own shell's command line; use `pkill -x NAME`.
+  A container's PID 1 ignores SIGTERM, so clean up stray ones with `-9`.

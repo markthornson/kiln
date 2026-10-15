@@ -22,6 +22,9 @@ func TestParseRun(t *testing.T) {
 	if cfg.Limits.MaxPids != 5 || cfg.Limits.MemoryBytes != 20000000 {
 		t.Errorf("Limits = %+v", cfg.Limits)
 	}
+	if cfg.Network != "bridge" {
+		t.Errorf("Network = %q, want bridge by default", cfg.Network)
+	}
 	if len(cfg.ID) != 12 {
 		t.Errorf("ID = %q, want 12 hex chars", cfg.ID)
 	}
@@ -39,6 +42,7 @@ func TestParseRunErrors(t *testing.T) {
 		{"", "sh"},
 		{"/tmp/rfs", ""},
 		{"-bogus", "/tmp/rfs", "sh"},
+		{"-net", "host", "/tmp/rfs", "sh"},
 	} {
 		if _, err := parseRun(args, io.Discard); err == nil {
 			t.Errorf("parseRun(%q) succeeded, want error", args)
@@ -76,6 +80,7 @@ func FuzzParseRun(f *testing.F) {
 	f.Add("-pids\x005\x00/tmp/rfs\x00sh")
 	f.Add("-memory=1\x00-hostname\x00box\x00/r\x00sh\x00-c\x00ls")
 	f.Add("--\x00-weird-rootfs\x00cmd")
+	f.Add("-net\x00none\x00/r\x00sh")
 	f.Add("")
 	f.Fuzz(func(t *testing.T, joined string) {
 		args := strings.Split(joined, "\x00")
@@ -88,6 +93,9 @@ func FuzzParseRun(f *testing.F) {
 		}
 		if cfg.Limits.MemoryBytes < 0 || cfg.Limits.MaxPids < 0 {
 			t.Fatalf("negative limits from %q: %+v", args, cfg.Limits)
+		}
+		if cfg.Network != "bridge" && cfg.Network != "none" {
+			t.Fatalf("bad network mode %q from %q", cfg.Network, args)
 		}
 		if cfg.Hostname == "" || len(cfg.Hostname) > maxHostname {
 			t.Fatalf("bad hostname %q from %q", cfg.Hostname, args)

@@ -1,7 +1,7 @@
 // Command kiln is a minimal container runtime.
 //
 //	kiln rootfs DIR [BINARY...]
-//	kiln run [-memory BYTES] [-pids N] [-hostname NAME] ROOTFS CMD [ARG...]
+//	kiln run [-memory BYTES] [-pids N] [-hostname NAME] [-net bridge|none] ROOTFS CMD [ARG...]
 //
 // "init" is a hidden subcommand: container.Run re-executes kiln with it inside
 // the new namespaces.
@@ -23,7 +23,7 @@ import (
 
 const usage = `usage:
   kiln rootfs DIR [BINARY...]
-  kiln run [-memory BYTES] [-pids N] [-hostname NAME] ROOTFS CMD [ARG...]
+  kiln run [-memory BYTES] [-pids N] [-hostname NAME] [-net bridge|none] ROOTFS CMD [ARG...]
 `
 
 // maxHostname is the kernel's limit for sethostname (HOST_NAME_MAX).
@@ -95,6 +95,7 @@ func parseRun(args []string, stderr io.Writer) (container.Config, error) {
 	memory := fs.Int64("memory", 0, "memory limit in bytes (0 = unlimited)")
 	pids := fs.Int64("pids", 0, "max processes/threads (0 = unlimited)")
 	hostname := fs.String("hostname", "kiln", "container hostname")
+	netMode := fs.String("net", container.NetworkBridge, "network: bridge (eth0 on kiln0) or none (loopback only)")
 	if err := fs.Parse(args); err != nil {
 		return container.Config{}, err
 	}
@@ -103,6 +104,9 @@ func parseRun(args []string, stderr io.Writer) (container.Config, error) {
 	}
 	if *hostname == "" || len(*hostname) > maxHostname {
 		return container.Config{}, fmt.Errorf("hostname must be 1-%d bytes", maxHostname)
+	}
+	if *netMode != container.NetworkBridge && *netMode != container.NetworkNone {
+		return container.Config{}, fmt.Errorf("-net must be %q or %q", container.NetworkBridge, container.NetworkNone)
 	}
 	if fs.NArg() < 2 {
 		return container.Config{}, fmt.Errorf("need ROOTFS and CMD")
@@ -116,6 +120,7 @@ func parseRun(args []string, stderr io.Writer) (container.Config, error) {
 		Hostname: *hostname,
 		Args:     fs.Args()[1:],
 		Limits:   cgroups.Limits{MemoryBytes: *memory, MaxPids: *pids},
+		Network:  *netMode,
 	}, nil
 }
 

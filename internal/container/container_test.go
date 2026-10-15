@@ -1,14 +1,22 @@
 package container
 
 import (
+	"bufio"
 	"fmt"
+	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/markthornson/kiln/internal/mountinfo"
+	"github.com/markthornson/kiln/internal/network"
 	"github.com/markthornson/kiln/internal/rootfs"
 )
 
@@ -25,6 +33,15 @@ func TestMain(m *testing.M) {
 			os.Exit(tryEscape(os.Args[2]))
 		case "mounts":
 			os.Exit(checkMounts())
+		case "net":
+			os.Exit(checkNet(os.Args[2], os.Args[3]))
+		case "hang":
+			time.Sleep(time.Hour)
+		case "run-hang": // act as a kiln process running a long container
+			code, err := Run(Config{ID: os.Args[3], Rootfs: os.Args[2], Hostname: "kilntest",
+				Args: []string{"/bin/kilntest", "hang"}, Network: NetworkBridge})
+			fmt.Fprintln(os.Stderr, "run-hang returned:", code, err)
+			os.Exit(1)
 		}
 	}
 	os.Exit(m.Run())
@@ -83,6 +100,58 @@ func checkMounts() int {
 	return contained
 }
 
+// checkNet verifies the container's interfaces for the given network mode and
+// that it can (bridge) or cannot (none) reach a TCP server on the host.
+func checkNet(mode, hostAddr string) int {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return failed
+	}
+	var names []string
+	for _, ifi := range ifaces {
+		names = append(names, ifi.Name)
+		if ifi.Flags&net.FlagUp == 0 {
+			fmt.Fprintln(os.Stderr, ifi.Name, "is down")
+			return failed
+		}
+	}
+	slices.Sort(names)
+	conn, dialErr := net.DialTimeout("tcp", hostAddr, 3*time.Second)
+	if mode == "none" {
+		if fmt.Sprint(names) != "[lo]" {
+			fmt.Fprintln(os.Stderr, "interfaces:", names)
+			return escaped
+		}
+		if dialErr == nil {
+			fmt.Fprintln(os.Stderr, "reached host with -net none")
+			return escaped
+		}
+		return contained
+	}
+	if fmt.Sprint(names) != "[eth0 lo]" {
+		fmt.Fprintln(os.Stderr, "interfaces:", names)
+		return failed
+	}
+	if dialErr != nil {
+		fmt.Fprintln(os.Stderr, "dial host:", dialErr)
+		return failed
+	}
+	defer conn.Close()
+	// The address the host sees must be the one kiln told us about.
+	if got := conn.LocalAddr().(*net.TCPAddr).IP.String(); got != os.Getenv("KILN_IP") {
+		fmt.Fprintf(os.Stderr, "local address %s, KILN_IP %q\n", got, os.Getenv("KILN_IP"))
+		return failed
+	}
+	conn.SetReadDeadline(time.Now().Add(20 * time.Second))
+	reply, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil || reply != "ok\n" {
+		fmt.Fprintf(os.Stderr, "reply %q, %v\n", reply, err)
+		return failed
+	}
+	return contained
+}
+
 func requireRoot(t *testing.T) {
 	t.Helper()
 	if os.Geteuid() != 0 {
@@ -127,7 +196,12 @@ func newRootfs(t *testing.T) string {
 
 func runIn(t *testing.T, dir string, args ...string) int {
 	t.Helper()
-	code, err := Run(Config{ID: "test-" + filepath.Base(dir), Rootfs: dir, Hostname: "kilntest", Args: args})
+	return runNet(t, dir, NetworkNone, args...)
+}
+
+func runNet(t *testing.T, dir, mode string, args ...string) int {
+	t.Helper()
+	code, err := Run(Config{ID: "test-" + filepath.Base(dir), Rootfs: dir, Hostname: "kilntest", Args: args, Network: mode})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,4 +228,167 @@ func TestOnlyContainerMountsVisible(t *testing.T) {
 	if code := runIn(t, newRootfs(t), "/bin/kilntest", "mounts"); code != contained {
 		t.Fatalf("mounts check: exit %d", code)
 	}
+}
+
+func TestBridgeNetwork(t *testing.T) {
+	requireRoot(t)
+	if err := network.EnsureBridge(); err != nil {
+		t.Fatal(err)
+	}
+	// Dial a host address outside the bridge subnet so the container's
+	// default route is exercised, not just the on-link subnet route.
+	target := hostAddrOutside(t, network.Subnet)
+	ln, err := net.Listen("tcp", net.JoinHostPort(target.String(), "0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	ln.(*net.TCPListener).SetDeadline(time.Now().Add(30 * time.Second))
+
+	// Reply only once both containers are connected, so they must be running
+	// at the same time, each with its own address.
+	peers := make(chan []string, 1)
+	go func() {
+		var conns []net.Conn
+		var ips []string
+		for len(conns) < 2 {
+			c, err := ln.Accept()
+			if err != nil {
+				break
+			}
+			conns = append(conns, c)
+			ips = append(ips, c.RemoteAddr().(*net.TCPAddr).IP.String())
+		}
+		for _, c := range conns {
+			fmt.Fprintln(c, "ok")
+			c.Close()
+		}
+		peers <- ips
+	}()
+
+	dirs := []string{newRootfs(t), newRootfs(t)}
+	codes := make([]int, len(dirs))
+	var wg sync.WaitGroup
+	for i, dir := range dirs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Not runNet: t.Fatal must not be called off the test goroutine.
+			code, err := Run(Config{ID: "test-" + filepath.Base(dir), Rootfs: dir, Hostname: "kilntest",
+				Args: []string{"/bin/kilntest", "net", "bridge", ln.Addr().String()}, Network: NetworkBridge})
+			if err != nil {
+				t.Error(err)
+			}
+			codes[i] = code
+		}()
+	}
+	wg.Wait()
+	ips := <-peers
+	for i, code := range codes {
+		if code != contained {
+			t.Errorf("container %d: exit %d", i, code)
+		}
+	}
+	if len(ips) != 2 || ips[0] == ips[1] {
+		t.Fatalf("container addresses = %v, want two distinct", ips)
+	}
+	for _, ip := range ips {
+		if !network.Subnet.Contains(netip.MustParseAddr(ip)) {
+			t.Errorf("container address %s outside %v", ip, network.Subnet)
+		}
+		if _, err := os.Stat(filepath.Join(network.LeaseDir, ip)); !os.IsNotExist(err) {
+			t.Errorf("lease for %s not released: %v", ip, err)
+		}
+	}
+	// Host ends of the veth pairs must be gone.
+	ifaces, _ := net.Interfaces()
+	for _, ifi := range ifaces {
+		for _, dir := range dirs {
+			if ifi.Name == "kvtest-"+filepath.Base(dir) {
+				t.Errorf("leftover host link %s", ifi.Name)
+			}
+		}
+	}
+}
+
+// hostAddrOutside returns a non-loopback IPv4 address of the host that is not
+// in subnet, falling back to the bridge gateway if there is none.
+func hostAddrOutside(t *testing.T, subnet netip.Prefix) netip.Addr {
+	t.Helper()
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range addrs {
+		p, err := netip.ParsePrefix(a.String())
+		if err != nil {
+			continue
+		}
+		if ip := p.Addr(); ip.Is4() && !ip.IsLoopback() && !subnet.Contains(ip) {
+			return ip
+		}
+	}
+	t.Log("no host address outside the bridge subnet; default route not exercised")
+	return network.Gateway(subnet)
+}
+
+func TestNoNetwork(t *testing.T) {
+	requireRoot(t)
+	if err := network.EnsureBridge(); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort(network.Gateway(network.Subnet).String(), "0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if code := runNet(t, newRootfs(t), NetworkNone, "/bin/kilntest", "net", "none", ln.Addr().String()); code != contained {
+		t.Fatalf("exit %d", code)
+	}
+}
+
+func TestUnknownNetworkMode(t *testing.T) {
+	if _, err := Run(Config{ID: "x", Rootfs: "/", Args: []string{"true"}, Network: "host"}); err == nil || !strings.Contains(err.Error(), "network mode") {
+		t.Fatalf("Run with -net host: %v", err)
+	}
+}
+
+// TestContainerDiesWithKiln kills a kiln process with SIGKILL, so it cannot
+// clean up, and checks its container dies too. A surviving container would
+// keep an IP whose lease looks stale and gets reassigned.
+func TestContainerDiesWithKiln(t *testing.T) {
+	requireRoot(t)
+	dir := newRootfs(t)
+	id := "test-orphan"
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(self, "run-hang", dir, id)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// The host end of the veth lives exactly as long as the container's
+	// network namespace, i.e. as long as the container.
+	link := "kv" + id
+	if !waitFor(func() bool { _, err := net.InterfaceByName(link); return err == nil }) {
+		cmd.Process.Kill()
+		t.Fatalf("container never came up (no %s)", link)
+	}
+	cmd.Process.Kill()
+	cmd.Wait()
+	if !waitFor(func() bool { _, err := net.InterfaceByName(link); return err != nil }) {
+		exec.Command("pkill", "-9", "-x", "kilntest").Run() // don't leak the orphan
+		t.Fatal("container survived its kiln process")
+	}
+}
+
+func waitFor(cond func() bool) bool {
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if cond() {
+			return true
+		}
+	}
+	return false
 }

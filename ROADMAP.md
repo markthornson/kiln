@@ -9,7 +9,7 @@ property test, and the README updated (including the "Bugs found" table).
 - [x] M1.2 cgroup v1 memory + pids limits; exit codes and signal deaths reported
 - [x] M1.3 `kiln rootfs`: build rootfs from host binaries via ldd (fuzzed)
 - [x] M1.4 `pivot_root` instead of chroot (chroot is escapable)
-- [ ] M1.5 Network namespace + veth pair + bridge, so containers get an IP
+- [x] M1.5 Network namespace + veth pair + bridge, so containers get an IP
 - [ ] M1.6 Overlay filesystem: read-only base image + per-container writable layer
 - [ ] M1.7 Integration test suite (`go test -tags integration`, needs root): isolation, limits, cleanup
 - [ ] M1.8 cgroup v2 support, detected at runtime
@@ -42,4 +42,6 @@ property test, and the README updated (including the "Bugs found" table).
 - The runtime needs root; rootless via user namespaces would be a nice stretch goal.
 - Until M1.9, the container process keeps every capability: `pivot_root` stops the
   chroot breakout, but a root process could still e.g. `mknod` the host disk and mount it.
+- Networking is IPv4-only on one fixed subnet (10.88.0.0/24), with no NAT/masquerade to
+  the outside, no port publishing and no DNS. Containers reach the host and each other only.
 - Only cgroup v1 is supported so far (the dev sandbox uses v1).
